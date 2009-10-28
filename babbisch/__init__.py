@@ -1,25 +1,29 @@
 from __future__ import with_statement
 
+import sys
+import os
+
+# stolen from http://www.language-binding.net/pygccxml/example/example.py.html
+# find out the file location within the sources tree
+this_module_dir_path = os.path.abspath (os.path.dirname(sys.modules[__name__].__file__))
+# find out gccxml location
+gccxml_09_path = os.path.join(this_module_dir_path, '..', '..', '..', 'gccxml_bin', 'v09', sys.platform, 'bin')
+
+import pygccxml.parser, pygccxml.declarations
+
+
 import os.path
 from optparse import OptionParser
 
-from babbisch.utils import ASTCache
-from babbisch.analyze import AnalyzingVisitor
-from babbisch.filter import include_exclude
+from babbisch.analyze import Analyzer
 
 USAGE = 'usage: %prog [options] headerfile...'
 FORMATS = {
-        'json': lambda visitor: visitor.to_json(indent=2)
+        'json': lambda analyzer: analyzer.to_json(indent=2)
         }
 
 def main():
     parser = OptionParser(usage=USAGE)
-    parser.add_option('--no-cache',
-            action='store_false',
-            dest='cache',
-            default=True,
-            help="don't create a header cache file",
-            )
     parser.add_option('-f', '--format',
             action='store',
             choices=FORMATS.keys(),
@@ -27,52 +31,40 @@ def main():
             default='json',
             help="defines the output format to use [supported: json]",
             )
-    parser.add_option('-i', '--include-header',
-            action='append',
-            dest='include_headers',
-            default=[],
-            help="""include headers whose filename matches REGEX""",
-            metavar='REGEX'
-            )
-    parser.add_option('-x', '--exclude-header',
-            action='append',
-            dest='exclude_headers',
-            default=[],
-            help="""exclude headers whose filename matches REGEX (even if they would be included by the -i option)""",
-            metavar='REGEX'
-            )
     parser.add_option('-o',
             action='store',
             dest='output',
             default=None,
             help="defines the output filename [default: stdout]",
             )
+    parser.add_option('-I',
+            action='append',
+            dest='includes',
+            default=[],
+            help='add PATH to the include path',
+            metavar='PATH'
+            )
+
     options, args = parser.parse_args()
-    if not args:
-        parser.error("You have to specify at least one input file")
+    if len(args) != 1:
+        parser.error('You have to pass exactly one input file.')
+    
+    config = pygccxml.parser.config_t(
+            gccxml_path=gccxml_09_path,
+            include_paths=options.includes,
+    )
 
-    options.include_headers.extend(args)
-    # read and analyze all source files
-    visitor = AnalyzingVisitor(
-            include=include_exclude(options.include_headers, options.exclude_headers)
-            )
-    cache = ASTCache(
-            load=options.cache,
-            )
-    try:
-        for filename in args:
-            if not os.path.isfile(filename):
-                parser.error("'%s' is not a valid filename" % filename)
-            else:
-                path = os.path.abspath(filename)
-                ast = cache.get_header(path)
-                visitor.visit(ast)
-    finally:
-        if options.cache:
-            cache.save()
-
+    # read and analyze source file
+    filename = args[0]
+    if not os.path.isfile(filename):
+        parser.error("'%s' is not a valid filename" % filename)
+    else:
+        decls = pygccxml.parser.parse([filename], config)
+        analyzer = Analyzer(pygccxml.declarations.get_global_namespace(decls))
+        analyzer.analyze()
+    
     # output
-    stuff = FORMATS[options.format](visitor)
+    stuff = FORMATS[options.format](analyzer)
     if options.output is None:
         # just print it
         print stuff

@@ -2,9 +2,9 @@
 
 import operator
 
-from pycparser import c_parser, c_ast, parse_file
-
 from .odict import odict
+
+import pygccxml.declarations
 
 def format_tag(something):
     """
@@ -18,13 +18,11 @@ def format_tag(something):
 
 def format_coord(coord):
     if coord is not None:
-        return {'file': coord.file, 'line': coord.line}
+        return {'file': coord.file_name, 'line': coord.line}
     else:
         return None
 
 def format_type(type, objects):
-    if type.tag in objects:
-        type = type.tag
     return type
 
 class Object(object):
@@ -116,7 +114,7 @@ class Struct(Compound):
         state = Type.get_state(self, objects)
         state.update({
             'name': self.name,
-            'members': [(name, format_type(typ, objects), bitsize)
+            'members': [(name, typ, bitsize)
                 for name, (typ, bitsize) in self.members.iteritems()
                 ]
             })
@@ -125,8 +123,8 @@ class Struct(Compound):
 class Enum(Compound):
     modifier = 'ENUM(%s)'
 
-    def add_member(self, name, type):
-        self.members[name] = type
+    def add_member(self, name, value):
+        self.members[name] = value
 
     def get_state(self, objects):
         state = Type.get_state(self, objects)
@@ -255,259 +253,119 @@ del TYPES
 del SYNONYMS
 del _get_builtins
 
-def _int(value):
-    if value.startswith('0x'):
-        return int(value, base=16)
-    elif value.startswith('0'):
-        return int(value, base=8)
-    else:
-        return int(value)
+class AnalyzingError(Exception):
+    pass
 
-def _char(value):
-    if value.startswith("'"):
-        return ord(value[1])
-    else:
-        return _int(value)
+class ImplementationError(AnalyzingError):
+    pass
 
-CONSTANT_TYPES = {
-        'int': _int,
-        'char': _char,
-        }
-
-BINARY_OPERATORS = {
-        '+': operator.add,
-        '-': operator.sub,
-        '*': operator.mul,
-        '/': operator.div,
-        '<<': operator.lshift,
-        '>>': operator.rshift,
-        '&': operator.and_,
-        '|': operator.or_,
-        '^': operator.xor,
-        }
-UNARY_OPERATORS = {
-        '+': lambda x: abs(x),
-        '-': operator.neg,
-        '~': operator.invert,
-        }
-
-def resolve_constant(node, resolver=None):
-    if isinstance(node, c_ast.BinaryOp):
-        return BINARY_OPERATORS[node.op](
-                resolve_constant(node.left, resolver),
-                resolve_constant(node.right, resolver)
-                )
-    elif isinstance(node, c_ast.UnaryOp):
-        return UNARY_OPERATORS[node.op](
-                resolve_constant(node.expr, resolver)
-                )
-    elif isinstance(node, c_ast.Constant):
-        return CONSTANT_TYPES[node.type](node.value)
-    elif isinstance(node, c_ast.ID):
-        return resolver(node.name)
-    else:
-        node.show()
-        assert 0, "Don't know %s" % node
-
-class AnalyzingVisitor(c_ast.NodeVisitor):
-    def __init__(self, builtins=BUILTINS, include=None):
-        self.objects = odict() # typedefs, structs, unions, enums, stuff, functions go here
-        self.objects.update(builtins)
-        self.include = include
-
-    def _include_object(self, obj):
-        if (obj.coord is not None and self.include is not None):
-            if not self.include(obj.coord['file']):
-                return False
-        return True
+class Analyzer(object):
+    def __init__(self, namespace):
+        self.namespace = namespace
+        self.objects = odict()
 
     def to_json(self, **kwargs):
         import json
         return json.dumps(
-                [(k, v) for k, v in self.objects.iteritems() if self._include_object(v)],
+                self.objects.items(),
                 default=lambda obj: obj.get_state(self.objects),
                 **kwargs)
 
-    def generic_visit(self, node):
-        # new generic visit method: just do nothing for unknown nodes.
-        pass
+    def analyze(self):
+        self.analyze_classes()
+        self.analyze_enumerations()
+        self.analyze_typedefs()
+        self.analyze_functions()
 
-    def visit(self, node):
-        return c_ast.NodeVisitor.visit(self, node)
+    def analyze_classes(self):
+        """
+            analyze all classes (structs, to be exact, but gccxml handles structs as classes
+            because C++ also does).
+        """
+        for class_ in self.namespace.classes():
+            self.analyze_class(class_)
 
-    def visit_Decl(self, node):
-        # visit type node and set storage info if type is a FuncDecl.
-        if isinstance(node.type, c_ast.FuncDecl):
-            obj = self.visit(node.type)
-            obj.storage.extend(node.storage)
+    def analyze_enumerations(self):
+        for enum in self.namespace.enumerations():
+            self.analyze_enum(enum)
+
+    def analyze_typedefs(self):
+        for typedef in self.namespace.typedefs():
+            self.analyze_typedef(typedef)
+
+    def analyze_functions(self):
+        for function in self.namespace.free_functions():
+            self.analyze_function(function)
+
+    def resolve_type(self, type):
+        if isinstance(type, pygccxml.declarations.fundamental_t):
+            return type.CPPNAME
+        elif isinstance(type, pygccxml.declarations.pointer_t):
+            return 'POINTER(%s)' % type.base
+        elif isinstance(type, pygccxml.declarations.declarated_t):
+            return self.resolve_type(type.declaration) # TODO: not sure about that
+        elif isinstance(type, (pygccxml.declarations.class_declaration_t, pygccxml.declarations.class_t)):
+            # classes are structs.
+            return 'STRUCT(%s)' % type.name
+        elif isinstance(type, pygccxml.declarations.typedef_t):
+            # the type name of a typedef'ed type is the type name.
+            return type.name
+        elif isinstance(type, pygccxml.declarations.array_t):
+            return 'ARRAY(%s, %s)' % (self.resolve_type(type.base), format_tag(type.size))
+        elif isinstance(type, pygccxml.declarations.volatile_t):
+            return 'VOLATILE(%s)' % self.resolve_type(type.base)
+        elif isinstance(type, pygccxml.declarations.enumeration_t):
+            return 'ENUM(%s)' % type.name
+        elif isinstance(type, pygccxml.declarations.restrict_t):
+            return 'RESTRICT(%s)' % self.resolve_type(type.base)
+        elif isinstance(type, pygccxml.declarations.const_t):
+            return 'CONST(%s)' % self.resolve_type(type.base)
         else:
-            # I think we'll just visit the type node. TODO: Really do that?
-            self.visit(node.type)
+            print vars(type)
+            raise ImplementationError("Unknown type: %r (%r)" % (type, type.__class__))
 
-    def visit_FuncDef(self, node):
-        # FuncDefs contain FuncDecls. Just handle it if
-        # it isn't already known.
-        if node.decl.name not in self.objects:
-            self.visit(node.decl.type)
+    def analyze_class(self, class_):
+        obj = Struct(format_coord(class_.location), class_.name)
+        # add all members, but only variables, because all other stuff
+        # is evil C++ stuff.
+        for member in class_.get_members():
+            if isinstance(member, pygccxml.declarations.variable_t):
+                type_tag = self.resolve_type(member.type)
+                obj.add_member(member.name, type_tag, member.bits)
+        # add it to the objects
+        self.objects[obj.name] = obj
 
-    def visit_FileAST(self, node):
-        for child in node.children():
-            self.visit(child)
+    def analyze_enum(self, enum):
+        obj = Enum(format_coord(enum.location), enum.name)
+        for value in enum.values:
+            obj.add_member(value[0], value[1])
+        self.objects[obj.name] = obj
 
-    def resolve_type(self, node):
-        if isinstance(node, c_ast.IdentifierType):
-            name = ' '.join(reversed(node.names))
-            return self.objects[name]
-        elif isinstance(node, c_ast.PtrDecl):
-            # ignoring qualifiers here
-            return Pointer(format_coord(node.coord), self.resolve_type(node.type))
-        elif isinstance(node, c_ast.FuncDecl):
-            # that's a function pointer declaration, get the function type
-            return self.make_functiontype(node)
-        elif isinstance(node, (c_ast.Struct, c_ast.Enum, c_ast.Union)):
-            # revisit structs, enums, unions
-            return self.visit(node)
-        elif isinstance(node, c_ast.TypeDecl):
-            # just ignoring TypeDecl nodes is not nice, but I don't
-            # know what else I should do.
-            return self.resolve_type(node.type)
-        elif isinstance(node, c_ast.ArrayDecl):
-            # create an array object for arrays.
-            dim = None
-            if node.dim is not None:
-                dim = resolve_constant(node.dim)
-            return Array(format_coord(node.coord),
-                    self.resolve_type(node.type),
-                    dim
-                    )
-        else:
-            print 'Unknown type: ',
-            node.show()
+    def analyze_typedef(self, typedef):
+        obj = Typedef(
+                format_coord(typedef.location),
+                typedef.name,
+                self.resolve_type(typedef.type)
+                )
+        self.objects[obj.tag] = obj
 
-    def add_type(self, type):
-        self.objects[type.tag] = type
-
-    def _add_compound_members(self, obj, node):
-        if node.decls is None:
-##            print 'No decls: ',
-##            node.show()
-            return
-        for decl in node.decls:
-            # ignoring qualifiers and storage classes here
-            name = decl.name
-            type = self.resolve_type(decl.type)
-            if isinstance(obj, Struct):
-                bitsize = None
-                if decl.bitsize is not None:
-                    bitsize = resolve_constant(decl.bitsize)
-                obj.add_member(name, type, bitsize)
-            else:
-                obj.add_member(name, type)
-
-    def make_functiontype(self, node):
-        # don't get the name
-        # first, handle the return type
-        rettype = self.resolve_type(node.type)
-        # then, handle the argument types.
-        # Here, argtypes is just a list (no names included)
-        argtypes = []
-        varargs = False
-        if node.args is not None:
-            for param in node.args.params:
-                if isinstance(param, c_ast.EllipsisParam):
-                    varargs = True
-                elif (len(node.args.params) == 1
-                        and param.name is None
-                        and isinstance(param.type.type, c_ast.IdentifierType)
-                        and param.type.type.names == ['void']):
-                    # it's the single `void` parameter signalizing
-                    # that there are no arguments.
-                    break
-                else:
-                    argtypes.append(self.resolve_type(param.type))
-        obj = FunctionType(format_coord(node.coord), rettype, argtypes, varargs)
-        return obj
-
-    def visit_Struct(self, node):
-        type = Struct(format_coord(node.coord), node.name)
-        # add the members
-        self._add_compound_members(type, node)
-        # if the struct is not anonymous, add it to
-        # the list of known objects
-        if node.name is not None:
-            self.add_type(type)
-        # return it, so visit_Typedef can handle anonymous structs
-        return type
-
-    def visit_Union(self, node):
-        type = Union(format_coord(node.coord), node.name)
-        # add the members
-        self._add_compound_members(type, node)
-        # if the union is not anonymous, add it to
-        # the list of known objects
-        if node.name is not None:
-            self.add_type(type)
-        # return it, so visit_Typedef can handle anonymous structs
-        return type
-
-    def visit_Enum(self, node):
-        type = Enum(format_coord(node.coord), node.name)
-        def _resolve(name):
-            return int(type.members[name]) # TODO: what about non-ints?
-        # now, add all values, if there are any
-        if node.values is not None:
-            value = 0
-            for enumerator in node.values.enumerators:
-                name = enumerator.name
-                if enumerator.value is not None:
-                    if isinstance(enumerator.value, c_ast.ID):
-                        value = type.members[enumerator.value.name]
-                    else:
-                        value = resolve_constant(enumerator.value, _resolve)
-                type.add_member(name, value)
-                value += 1
-        # if the enum is not anonymous, add it to
-        # the list of known objects
-        if node.name is not None:
-            self.add_type(type)
-        return type
-
-    def visit_Typedef(self, node):
-        # ignoring storage classes and qualifiers here
-        # get the type object
-        type = Typedef(format_coord(node.coord), node.name, self.resolve_type(node.type))
-        self.add_type(type)
-        return type
-
-    def visit_FuncDecl(self, node):
-        # get the name, recursively
-        type = node.type
-        while not isinstance(type, c_ast.TypeDecl):
-            type = type.type
-        name = type.declname
-        # first, handle the return type
-        rettype = self.resolve_type(node.type)
-        # then, handle the argument types
+    def analyze_function(self, function):
         arguments = odict()
-        varargs = False
-        if node.args is not None:
-            for index, param in enumerate(node.args.params):
-                if isinstance(param, c_ast.EllipsisParam):
-                    varargs = True
-                elif (len(node.args.params) == 1
-                        and param.name is None
-                        and isinstance(param.type.type, c_ast.IdentifierType)
-                        and param.type.type.names == ['void']):
-                    # it's the single `void` parameter signalizing
-                    # that there are no arguments.
-                    break
-                else:
-                    argname = param.name
-                    if argname is None:
-                        argname = '!Unnamed%d' % index
-                    arguments[argname] = self.resolve_type(param.type)
-        obj = Function(format_coord(node.coord), name, rettype, arguments, varargs)
-        if name is not None:
-            self.add_type(obj)
-        return obj
+        varargs = True
+        for arg in function.arguments:
+            if arg.ellipsis:
+                varargs = True
+            else:
+                arguments[arg.name] = self.resolve_type(arg.type)
+        rettype = None
+        if function.return_type:
+            rettype = self.resolve_type(function.return_type)
+        self.objects[function.name] = Function(
+                format_coord(function.location),
+                function.name,
+                rettype,
+                arguments,
+                varargs,
+                ('extern',) if function.has_extern else None
+                )
 

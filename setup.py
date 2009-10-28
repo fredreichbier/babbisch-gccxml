@@ -1,15 +1,15 @@
 from setuptools import setup
 
 setup(
-    name='babbisch',
+    name='babbisch-gccxml',
     version='0.1',
     packages=['babbisch'],
-    
-    install_requires=['pycparser'],
+
+    install_requires=['pygccxml'],
 
     entry_points={
             'console_scripts': [
-                'babbisch = babbisch:main',
+                'babbisch-gccxml = babbisch:main',
             ]
     },
     zip_safe=False,
