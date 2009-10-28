@@ -42,6 +42,16 @@ class Object(object):
                 'class': self.__class__.__name__
                 }
 
+UNNAMED_TEMPLATE = '!Unnamed%d'
+
+def _name_generator():
+    i = 1
+    while True:
+        yield UNNAMED_TEMPLATE % i
+        i += 1
+
+NAME_GEN = _name_generator()
+
 class Type(Object):
     pass
 
@@ -181,7 +191,7 @@ class Function(Object):
 class FunctionType(Object):
     def __init__(self, coord, rettype, argtypes, varargs=False):
         # construct the tag
-        tag = 'FUNCTIONTYPE(%s)' % (', '.join(a.tag for a in ([rettype] + argtypes)))
+        tag = 'FUNCTIONTYPE(%s)' % (', '.join(a for a in ([rettype] + argtypes)))
 
         Object.__init__(self, coord, tag)
         self.rettype = rettype
@@ -301,12 +311,14 @@ class Analyzer(object):
         if isinstance(type, pygccxml.declarations.fundamental_t):
             return type.CPPNAME
         elif isinstance(type, pygccxml.declarations.pointer_t):
-            return 'POINTER(%s)' % type.base
+            return 'POINTER(%s)' % self.resolve_type(type.base)
+        elif isinstance(type, pygccxml.declarations.free_function_type_t):
+            return self.analyze_function_type(type)
         elif isinstance(type, pygccxml.declarations.declarated_t):
             return self.resolve_type(type.declaration) # TODO: not sure about that
         elif isinstance(type, (pygccxml.declarations.class_declaration_t, pygccxml.declarations.class_t)):
             # classes are structs.
-            return 'STRUCT(%s)' % type.name
+            return 'STRUCT(%s)' % (type.name or None)
         elif isinstance(type, pygccxml.declarations.typedef_t):
             # the type name of a typedef'ed type is the type name.
             return type.name
@@ -325,7 +337,10 @@ class Analyzer(object):
             raise ImplementationError("Unknown type: %r (%r)" % (type, type.__class__))
 
     def analyze_class(self, class_):
-        obj = Struct(format_coord(class_.location), class_.name)
+        name = class_.name
+        if not name:
+            name = NAME_GEN.next()
+        obj = Struct(format_coord(class_.location), name)
         # add all members, but only variables, because all other stuff
         # is evil C++ stuff.
         for member in class_.get_members():
@@ -333,13 +348,13 @@ class Analyzer(object):
                 type_tag = self.resolve_type(member.type)
                 obj.add_member(member.name, type_tag, member.bits)
         # add it to the objects
-        self.objects[obj.name] = obj
+        self.objects[obj.tag] = obj
 
     def analyze_enum(self, enum):
         obj = Enum(format_coord(enum.location), enum.name)
         for value in enum.values:
             obj.add_member(value[0], value[1])
-        self.objects[obj.name] = obj
+        self.objects[obj.tag] = obj
 
     def analyze_typedef(self, typedef):
         obj = Typedef(
@@ -368,4 +383,19 @@ class Analyzer(object):
                 varargs,
                 ('extern',) if function.has_extern else None
                 )
+
+    def analyze_function_type(self, function):
+        arguments = []
+        varargs = True
+        # TODO: varargs
+        for idx, arg in enumerate(function.arguments_types):
+            arguments.append(self.resolve_type(arg))
+        rettype = None
+        if function.return_type:
+            rettype = self.resolve_type(function.return_type)
+        return FunctionType(
+                None,
+                rettype,
+                arguments,
+                varargs).tag
 
