@@ -273,6 +273,7 @@ class Analyzer(object):
     def __init__(self, namespace):
         self.namespace = namespace
         self.objects = odict()
+        self.class_types = {} # name: union or struct
 
     def to_json(self, **kwargs):
         import json
@@ -282,6 +283,21 @@ class Analyzer(object):
                 **kwargs)
 
     def analyze(self):
+        # apply names for unnamed stuff.
+        for decl in self.namespace.classes(allow_empty=True):
+            if not decl.name:
+                name = NAME_GEN.next()
+                decl._name = name
+                # I feel dirty.
+                decl.demangled = None
+            # generate a class types table.
+            self.class_types[decl.name] = decl.class_type
+        # make names for unnamed enums.
+        for decl in self.namespace.enums(name='', allow_empty=True):
+            name = NAME_GEN.next()
+            decl._name = name
+            decl.demangled = None
+        # and analyze the rest
         self.analyze_classes()
         self.analyze_enumerations()
         self.analyze_typedefs()
@@ -292,15 +308,15 @@ class Analyzer(object):
             analyze all classes (structs, to be exact, but gccxml handles structs as classes
             because C++ also does).
         """
-        for class_ in self.namespace.classes():
+        for class_ in self.namespace.classes(allow_empty=True):
             self.analyze_class(class_)
 
     def analyze_enumerations(self):
-        for enum in self.namespace.enumerations():
+        for enum in self.namespace.enumerations(allow_empty=True):
             self.analyze_enum(enum)
 
     def analyze_typedefs(self):
-        for typedef in self.namespace.typedefs():
+        for typedef in self.namespace.typedefs(allow_empty=True):
             self.analyze_typedef(typedef)
 
     def analyze_functions(self):
@@ -316,9 +332,20 @@ class Analyzer(object):
             return self.analyze_function_type(type)
         elif isinstance(type, pygccxml.declarations.declarated_t):
             return self.resolve_type(type.declaration) # TODO: not sure about that
-        elif isinstance(type, (pygccxml.declarations.class_declaration_t, pygccxml.declarations.class_t)):
-            # classes are structs.
-            return 'STRUCT(%s)' % (type.name or None)
+        elif isinstance(type, (pygccxml.declarations.class_t, pygccxml.declarations.class_declaration_t)):
+            # classes are structs or unions.
+            if not type.name:
+                raise ImplementationError("Unnamed type: %r (%r)" % (type, type.__class__))
+            if type.name not in self.class_types:
+                # oh no, unknown struct/class! most likely an incomplete type.
+                if hasattr(type, 'class_type'):
+                    self.class_types[type.name] = type.class_type
+                else:
+                    self.class_types[type.name] = pygccxml.declarations.CLASS_TYPES.STRUCT # <- uh oh ... evil guess
+            if self.class_types[type.name] == pygccxml.declarations.CLASS_TYPES.STRUCT:
+                return 'STRUCT(%s)' % type.name # <- that's safe because structs are cached.
+            else:
+                return 'UNION(%s)' % type.name
         elif isinstance(type, pygccxml.declarations.typedef_t):
             # the type name of a typedef'ed type is the type name.
             return type.name
@@ -338,15 +365,19 @@ class Analyzer(object):
 
     def analyze_class(self, class_):
         name = class_.name
-        if not name:
-            name = NAME_GEN.next()
-        obj = Struct(format_coord(class_.location), name)
+        if class_.class_type == pygccxml.declarations.CLASS_TYPES.STRUCT:
+            obj = Struct(format_coord(class_.location), name)
+        else:
+            obj = Union(format_coord(class_.location), name)
         # add all members, but only variables, because all other stuff
         # is evil C++ stuff.
         for member in class_.get_members():
             if isinstance(member, pygccxml.declarations.variable_t):
                 type_tag = self.resolve_type(member.type)
-                obj.add_member(member.name, type_tag, member.bits)
+                if class_.class_type == pygccxml.declarations.CLASS_TYPES.STRUCT:
+                    obj.add_member(member.name, type_tag, member.bits)
+                else:
+                    obj.add_member(member.name, type_tag)
         # add it to the objects
         self.objects[obj.tag] = obj
 
