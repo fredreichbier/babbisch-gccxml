@@ -342,10 +342,14 @@ class Analyzer(object):
                     self.class_types[type.name] = type.class_type
                 else:
                     self.class_types[type.name] = pygccxml.declarations.CLASS_TYPES.STRUCT # <- uh oh ... evil guess
-            if self.class_types[type.name] == pygccxml.declarations.CLASS_TYPES.STRUCT:
-                return 'STRUCT(%s)' % type.name # <- that's safe because structs are cached.
+            # Not artificial? Typedef'ed anon struct. See `visit_class`.
+            if not type.is_artificial:
+                return type.name
             else:
-                return 'UNION(%s)' % type.name
+                if self.class_types[type.name] == pygccxml.declarations.CLASS_TYPES.STRUCT:
+                    return 'STRUCT(%s)' % type.name # <- that's safe because structs are cached.
+                else:
+                    return 'UNION(%s)' % type.name
         elif isinstance(type, pygccxml.declarations.typedef_t):
             # the type name of a typedef'ed type is the type name.
             return type.name
@@ -365,6 +369,11 @@ class Analyzer(object):
 
     def analyze_class(self, class_):
         name = class_.name
+        # The difference between typedef struct { ... } A; and struct A { ... } is very
+        # funny in gccxml: The latter seems to be artificial. So - if the class object
+        # is not artificial, the class declaration is actually a typedef'ed anon struct.
+        if not class_.is_artificial:
+            name = NAME_GEN.next()
         if class_.class_type == pygccxml.declarations.CLASS_TYPES.STRUCT:
             obj = Struct(format_coord(class_.location), name)
         else:
@@ -380,6 +389,13 @@ class Analyzer(object):
                     obj.add_member(member.name, type_tag)
         # add it to the objects
         self.objects[obj.tag] = obj
+        if not class_.is_artificial:
+            td = Typedef(
+                    format_coord(class_.location),
+                    class_.name,
+                    obj.tag
+            )
+            self.objects[td.tag] = td
 
     def analyze_enum(self, enum):
         obj = Enum(format_coord(enum.location), enum.name)
