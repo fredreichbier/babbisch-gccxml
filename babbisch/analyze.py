@@ -276,7 +276,10 @@ class Analyzer(object):
         self.class_types = {} # name: union or struct
 
     def to_json(self, **kwargs):
-        import json
+        try:
+            import simplejson as json
+        except ImportError:
+            import json
         return json.dumps(
                 self.objects.items(),
                 default=lambda obj: obj.get_state(self.objects),
