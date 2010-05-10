@@ -416,7 +416,7 @@ class Analyzer(object):
 
     def analyze_function(self, function):
         arguments = odict()
-        varargs = True
+        varargs = False
         for arg in function.arguments:
             if arg.ellipsis:
                 varargs = True
