@@ -191,7 +191,7 @@ class Function(Object):
 class FunctionType(Object):
     def __init__(self, coord, rettype, argtypes, varargs=False):
         # construct the tag
-        tag = 'FUNCTIONTYPE(%s)' % (', '.join(a for a in ([rettype] + argtypes)))
+        tag = 'FUNCTIONTYPE(%s)' % (', '.join(a for a in ([rettype] + argtypes + (['...'] if varargs else []))))
 
         Object.__init__(self, coord, tag)
         self.rettype = rettype
@@ -436,10 +436,12 @@ class Analyzer(object):
 
     def analyze_function_type(self, function):
         arguments = []
-        varargs = True
-        # TODO: varargs
+        varargs = False
         for idx, arg in enumerate(function.arguments_types):
-            arguments.append(self.resolve_type(arg))
+            if isinstance(arg, pygccxml.declarations.cpptypes.ellipsis_t):
+                varargs = True
+            else:
+                arguments.append(self.resolve_type(arg))
         rettype = None
         if function.return_type:
             rettype = self.resolve_type(function.return_type)
